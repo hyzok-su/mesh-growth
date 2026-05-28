@@ -165,8 +165,6 @@ public class Script_Instance : GH_ScriptInstance
             int vEnd = hs[2 * i + 1].StartVertex;
             //only when skip is false it executes splitting or collapse.
             //there are two reasons that it skips.
-            //1: vertex is visited.
-            //2: vertex position doesn't change a lot.
             if (!skip[vStart] || !skip[vEnd])
             {
               var tl = (tL[vStart] + tL[vEnd]) / 2;

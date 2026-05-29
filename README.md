@@ -14,6 +14,8 @@ Reference: https://n-e-r-v-o-u-s.com/blog/?p=6721
 
 This project uses:
 
+- Platform: Rhino, Grasshopper
+
 - Kangaroo Physics by Daniel Piker
   https://github.com/Dan-Piker
 

@@ -1,4 +1,5 @@
 ![UUV Mapping](./MeshGrowth.gif) 
+# Mesh Growth
 ## Conceptual Inspiration
 
 The system is inspired by Nervous System’s Floraform framework, where form is generated through differential growth, local interaction rules, and adaptive remeshing.

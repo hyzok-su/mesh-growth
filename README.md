@@ -3,8 +3,8 @@
 
 This project uses:
 
-- Kangaroo Physics by Daniel Piker  
-  https://github.com/Dan-Piker/Kangaroo
+- Kangaroo Physics by Daniel Piker
+  https://github.com/Dan-Piker
 
 - Plankton (C# half-edge mesh library)
   https://github.com/meshmash/Plankton

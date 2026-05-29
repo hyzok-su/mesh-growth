@@ -3,15 +3,11 @@
 
 This project uses:
 
-- Kangaroo Physics (Grasshopper/Rhino plugin) by Daniel Piker  
+- Kangaroo Physics by Daniel Piker  
   https://github.com/Dan-Piker/Kangaroo
 
-- Plankton (half-edge mesh library for Rhino/Grasshopper)  
+- Plankton (C# half-edge mesh library)
   https://github.com/meshmash/Plankton
-
-- Rhino 3D + Grasshopper
-  https://www.rhino3d.com/
-  https://www.grasshopper3d.com/
 
 ## Acknowledgements
 

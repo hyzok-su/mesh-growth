@@ -8,7 +8,7 @@ In a similar spirit, this project treats geometry as a dynamic system that evolv
 - remeshing
 - feedback between environment and geometry
 
-reference: https://n-e-r-v-o-u-s.com/blog/?p=6721
+Reference: https://n-e-r-v-o-u-s.com/blog/?p=6721
 
 ## Dependencies
 

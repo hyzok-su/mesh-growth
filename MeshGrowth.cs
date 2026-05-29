@@ -57,564 +57,604 @@ public class Script_Instance : GH_ScriptInstance
   /// Output parameters as ref arguments. You don't have to assign output parameters,
   /// they will have a default value.
   /// </summary>
-  private void RunScript(int xnum, int ynum, List<double> data, UVInterval interval2d, Mesh pmesh, Mesh colmesh, double splitratio, double decsentrate, List<double> targetlengths, List<double> growthrate, double growthdecsent, List<bool> isanchored, double hingestrength, bool reset, int viewnum, ref object A, ref object B, ref object C, ref object D, ref object E, ref object F)
-  {
+ private void RunScript(
+    int xnum, int ynum,
+    List<double> data,
+    UVInterval interval2d,
+    Mesh inputMesh,
+    Mesh collisionMesh,
+    double splitRatio,
+    double remeshDecayRate,
+    List<double> targetLengths,
+    List<double> growthRates,
+    double growthDecay,
+    List<bool> isAnchored,
+    double hingeStrength,
+    bool reset,
+    int viewNum,
+    ref object A, ref object B, ref object C, ref object D, ref object E, ref object F)
+{
+    // Pre-processing 
+    bool remeshComplete;
+    double currentHingeStrength = hingeStrength;
+    double springStrength       = 1.0;
+    double selfPushDist1        = 1.0;
+    double selfPushDist2        = 1.5;
 
-    //pre
-    bool stop;
-    double hingestr = hingestrength;
-    double springstr = 1;
-    double dist1 = 1;
-    double dist2 = 1.5;
-    double sr = splitratio >= 0 ? (splitratio <= 1 ? splitratio : 1) : 0;
-
-
-    if(reset)
+    // Clamp splitRatio to [0, 1]
+    double clampedSplitRatio = splitRatio >= 0 ? (splitRatio <= 1 ? splitRatio : 1) : 0;
+    
+    //  Reset & Initialise 
+    if (reset)
     {
-      //edata
-      edata = new double[xnum][];
-      for(int i = 0;i < xnum;i++)
-      {
-        edata[i] = new double[ynum];
-        for(int j = 0;j < ynum;j++)
+        // Build 2D environment data array from flat input list
+        envData = new double[xnum][];
+        for (int i = 0; i < xnum; i++)
         {
-          edata[i][j] = data[j + i * ynum];
+            envData[i] = new double[ynum];
+            for (int j = 0; j < ynum; j++)
+            {
+                envData[i][j] = data[j + i * ynum];
+            }
         }
-      }
-      xNum = xnum;yNum = ynum;
-      uvDom = interval2d;
 
-      colMesh = colmesh;
+        xCount  = xnum;
+        yCount  = ynum;
+        uvDomain = interval2d;
+        collideMesh = collisionMesh;
 
-      tL = targetlengths;
-      P = pmesh.ToPlanktonMesh();
-      gR = growthrate;
+        perVertexTargetLength = targetLengths;
+        halfedgeMesh = inputMesh.ToPlanktonMesh();
+        perVertexGrowthRate = growthRates;
 
-      PSys = new KangarooSolver.PhysicalSystem();
-      anchors = new List<IGoal>();
-      springs = new List<IGoal>();
-      hinges = new List<IGoal>();
-      skip = new List<bool>();
-      _counter = 0;
-      int cc = 0;
-      foreach(var v in P.Vertices)
-      {
-        var pt = v.ToPoint3d();
-        var ee = Interpolate(pt);
-        eR.Add(ee);
-        PSys.AddParticle(pt, 10);
-        if (!isanchored[cc] && ee > 0)
-        {
-          skip.Add(false);
-        }
-        else
-        {
-          IGoal anch = new AnchorXYZ(pt, true, true, true, 100);
-          anch.PIndex = new int[1]{cc};
-          anchors.Add(anch);
-          skip.Add(true);
-        }
-        cc++;
-      }
+        physicsSystem = new KangarooSolver.PhysicalSystem();
+        anchorGoals   = new List<IGoal>();
+        springGoals   = new List<IGoal>();
+        hingeGoals    = new List<IGoal>();
+        isVertexFixed = new List<bool>();
+        _iterationCount = 0;
 
-      for(int i = 0;i < P.Halfedges.Count / 2;i++)
-      {
-        var h = P.Halfedges[2 * i];
-        var ph = P.Halfedges[2 * i + 1];
-        int s = h.StartVertex;
-        int e = ph.StartVertex;
-        double length_now = (P.Vertices[s].ToPoint3d() - P.Vertices[e].ToPoint3d()).Length;
-        IGoal spr = new Spring(s, e, length_now, springstr);
-        springs.Add(spr);
-        double a;
-        int[] pts = GetHinge(2 * i, P, out a);
-        if(h.AdjacentFace != -1 && ph.AdjacentFace != -1)
+        int vertexIndex = 0;
+        foreach (var vertex in halfedgeMesh.Vertices)
         {
-          IGoal hin = new Hinge(pts[0], pts[1], pts[2], pts[3], 0, hingestr);
-          hinges.Add(hin);
+            Point3d position    = vertex.ToPoint3d();
+            double envValue     = Interpolate(position);
+            perVertexEnvValue.Add(envValue);
+
+            physicsSystem.AddParticle(position, 10);
+
+            bool shouldBeFixed = isAnchored[vertexIndex] || envValue <= 0;
+            if (!shouldBeFixed)
+            {
+                isVertexFixed.Add(false);
+            }
+            else
+            {
+                IGoal anchor = new AnchorXYZ(position, true, true, true, 100);
+                anchor.PIndex = new int[1] { vertexIndex };
+                anchorGoals.Add(anchor);
+                isVertexFixed.Add(true);
+            }
+
+            vertexIndex++;
         }
-        else
+
+        // Initialise spring and hinge goals for each edge
+        int edgeCount = halfedgeMesh.Halfedges.Count / 2;
+        for (int i = 0; i < edgeCount; i++)
         {
-          IGoal hin = new Hinge(pts[0], pts[1], pts[2], pts[3], 0, 0);
-          hinges.Add(hin);
+            var  startHalfedge = halfedgeMesh.Halfedges[2 * i];
+            var  pairHalfedge  = halfedgeMesh.Halfedges[2 * i + 1];
+            int  startVert     = startHalfedge.StartVertex;
+            int  endVert       = pairHalfedge.StartVertex;
+
+            double restLength = (halfedgeMesh.Vertices[startVert].ToPoint3d()
+                               - halfedgeMesh.Vertices[endVert].ToPoint3d()).Length;
+            springGoals.Add(new Spring(startVert, endVert, restLength, springStrength));
+
+            double restAngle;
+            int[] hingeVerts = GetHingeVertices(2 * i, halfedgeMesh, out restAngle);
+
+            bool hasBothFaces = startHalfedge.AdjacentFace != -1 && pairHalfedge.AdjacentFace != -1;
+            double hingeStr   = hasBothFaces ? currentHingeStrength : 0;
+            hingeGoals.Add(new Hinge(hingeVerts[0], hingeVerts[1], hingeVerts[2], hingeVerts[3], 0, hingeStr));
         }
-      }
     }
 
-    double t = 1;
-    var counter = 0;
-    var dr = decsentrate; dr = dr < 0.96 ? (dr < 0 ? 0 : dr) : 0.96;
-    var gd = growthdecsent; gd = gd < 1 ? (gd < 0.6 ? 0.6 : gd) : 1;
 
-    //run
-    if(!reset)
+    // Main Loop (Remesh + Grow) 
+    double remeshTolerance = 1.0;
+    int    remeshIterations = 0;
+
+    double clampedRemeshDecay = remeshDecayRate;
+    clampedRemeshDecay = clampedRemeshDecay < 0.96 ? (clampedRemeshDecay < 0 ? 0 : clampedRemeshDecay) : 0.96;
+
+    double clampedGrowthDecay = growthDecay;
+    clampedGrowthDecay = clampedGrowthDecay < 1 ? (clampedGrowthDecay < 0.6 ? 0.6 : clampedGrowthDecay) : 1;
+
+
+    if (!reset)
     {
-      //remesh start
-      do
-      {
-        stop = true;
-        var hs = P.Halfedges;
-        var ec = hs.Count / 2;
-        var el = hs.GetLengths();
-        var vs = P.Vertices;
-        for(int i = 0;i < ec;i++)
+        //Remeshing Loop
+        do
         {
-          if (hs[2 * i].IsUnused == false)
-          {
-            int vStart = hs[2 * i].StartVertex;
-            int vEnd = hs[2 * i + 1].StartVertex;
-            //only when skip is false it executes splitting or collapse.
-            //there are two reasons that it skips.
-            if (!skip[vStart] || !skip[vEnd])
+            remeshComplete = true;
+
+            var halfedges  = halfedgeMesh.Halfedges;
+            int numEdges   = halfedges.Count / 2;
+            var edgeLengths = halfedges.GetLengths();
+            var vertices   = halfedgeMesh.Vertices;
+
+            // Split too long
+            for (int i = 0; i < numEdges; i++)
             {
-              var tl = (tL[vStart] + tL[vEnd]) / 2;
-              //split too long
-              if(el[2 * i] > (1 + t) * 1.25f * tl)
-              {
-                int spe = hs.TriangleSplitEdge(2 * i);
-                if(spe != -1)//succeed
+                if (halfedges[2 * i].IsUnused) continue;
+
+                int startVert = halfedges[2 * i].StartVertex;
+                int endVert   = halfedges[2 * i + 1].StartVertex;
+
+                // Only process edges where at least one endpoint is free
+                if (isVertexFixed[startVert] && isVertexFixed[endVert]) continue;
+
+                double avgTargetLength = (perVertexTargetLength[startVert] + perVertexTargetLength[endVert]) / 2.0;
+
+                if (edgeLengths[2 * i] > (1 + remeshTolerance) * 1.25f * avgTargetLength)
                 {
-                  var g1 = gR[vStart] *= gd;
-                  var g2 = gR[vEnd] *= gd;
-                  var g3 = g1 > g2 ? g2 : g1;//minimum
-                  var g4 = (g1 + g2) / 2;//average
-                  var g5 = (1 - sr) * g3 + sr * g4;//somewhere between minimum and average
-                  stop = false;
-                  int spv = hs[spe].StartVertex;
-                  skip.Add(false);
-                  tL.Add(tl);
-                  gR.Add(g5);
+                    int newHalfedge = halfedges.TriangleSplitEdge(2 * i);
+                    if (newHalfedge == -1) continue; // split failed
 
-                  //add particle
-                  var spt = vs[vStart].ToPoint3d();
-                  var ept = vs[vEnd].ToPoint3d();
-                  var mid = (spt + ept) / 2;
-                  PSys.AddParticle(mid, 10);
-                  eR.Add(Interpolate(mid));
+                    double growthStart = perVertexGrowthRate[startVert] *= clampedGrowthDecay;
+                    double growthEnd   = perVertexGrowthRate[endVert]   *= clampedGrowthDecay;
+                    double minGrowth   = growthStart > growthEnd ? growthEnd : growthStart;
+                    double avgGrowth   = (growthStart + growthEnd) / 2.0;
+                    double newGrowth   = (1 - clampedSplitRatio) * minGrowth + clampedSplitRatio * avgGrowth;
 
-                  //resize goals
-                  int sizediff = hs.Count / 2 - springs.Count;
-                  springs.AddRange(new Spring[sizediff]);
-                  hinges.AddRange(new Hinge[sizediff]);
-                  //loop add new & mark skip
-                  IEnumerable <int> nhs = hs.GetVertexCirculator(spe);D = hs[spe].StartVertex;
-                  foreach(var nh in nhs)
-                  {
-                    int edge = nh / 2;
-                    double restangle;
-                    int[] hpts = GetHinge(2 * edge, P, out restangle);
-                    //hinge
-                    if(P.Halfedges[nh].AdjacentFace != -1 && P.Halfedges[P.Halfedges.GetPairHalfedge(nh)].AdjacentFace != -1)
+                    remeshComplete = false;
+
+                    isVertexFixed.Add(false);
+                    perVertexTargetLength.Add(avgTargetLength);
+                    perVertexGrowthRate.Add(newGrowth);
+
+                    // Place the new midpoint particle
+                    Point3d startPt = vertices[startVert].ToPoint3d();
+                    Point3d endPt   = vertices[endVert].ToPoint3d();
+                    Point3d midPt   = (startPt + endPt) / 2.0;
+                    physicsSystem.AddParticle(midPt, 10);
+                    perVertexEnvValue.Add(Interpolate(midPt));
+
+                    // Resize goal lists to match new halfedge count
+                    int sizeDiff = halfedges.Count / 2 - springGoals.Count;
+                    springGoals.AddRange(new Spring[sizeDiff]);
+                    hingeGoals.AddRange(new Hinge[sizeDiff]);
+
+                    // Rebuild goals for all edges around the new vertex
+                    IEnumerable<int> neighborHalfedges = halfedges.GetVertexCirculator(newHalfedge);
+                    D = halfedges[newHalfedge].StartVertex;
+
+                    foreach (var neighborHe in neighborHalfedges)
                     {
-                      IGoal hin = new Hinge(hpts[0], hpts[1], hpts[2], hpts[3], 0, hingestr);
-                      hinges[edge] = hin;
-                    }
-                    else
-                    {
-                      IGoal hin = new Hinge(hpts[0], hpts[1], hpts[2], hpts[3], 0, 0);
-                      hinges[edge] = hin;
-                    }
+                        int edgeIndex = neighborHe / 2;
+                        double restAngle;
+                        int[] hingeVerts = GetHingeVertices(2 * edgeIndex, halfedgeMesh, out restAngle);
 
-                    //spring
-                    var lengthhere = vs[hpts[0]].ToPoint3d().DistanceTo(vs[hpts[1]].ToPoint3d());
-                    IGoal spr = new Spring(hpts[0], hpts[1], lengthhere, springstr);
-                    springs[edge] = spr;
-                  }
+                        bool hasBothFaces = halfedgeMesh.Halfedges[neighborHe].AdjacentFace != -1
+                                         && halfedgeMesh.Halfedges[halfedgeMesh.Halfedges.GetPairHalfedge(neighborHe)].AdjacentFace != -1;
+                        double hingeStr = hasBothFaces ? currentHingeStrength : 0;
+
+                        hingeGoals[edgeIndex]  = new Hinge(hingeVerts[0], hingeVerts[1], hingeVerts[2], hingeVerts[3], 0, hingeStr);
+
+                        double edgeLength = vertices[hingeVerts[0]].ToPoint3d().DistanceTo(vertices[hingeVerts[1]].ToPoint3d());
+                        springGoals[edgeIndex] = new Spring(hingeVerts[0], hingeVerts[1], edgeLength, springStrength);
+                    }
                 }
-              }
-
             }
-          }
-        }
-        P.Compact();
 
-        hs = P.Halfedges;
-        ec = hs.Count / 2;
-        el = hs.GetLengths();
-        vs = P.Vertices;
-        //merge too short
-        for(int i = 0;i < ec;i++)
-        {
-          if (hs[2 * i].IsUnused == false)
-          {
-            int vStart = hs[2 * i].StartVertex;
-            int vEnd = hs[2 * i + 1].StartVertex;
-            if (!skip[vStart] || !skip[vEnd])
+            halfedgeMesh.Compact();
+
+            // Refresh references after compaction
+            halfedges   = halfedgeMesh.Halfedges;
+            numEdges    = halfedges.Count / 2;
+            edgeLengths = halfedges.GetLengths();
+            vertices    = halfedgeMesh.Vertices;
+
+            // Collapse too short
+            for (int i = 0; i < numEdges; i++)
             {
-              var tl = (tL[vStart] + tL[vEnd]) / 2;
-              if(el[2 * i] < (1 - t) * 0.25f * tl)
-              {
-                //store the index of edge to remove
-                int next = hs[2 * i].NextHalfedge;
-                int prev = hs[2 * i + 1].PrevHalfedge;
-                int left = hs[2 * i].AdjacentFace;
-                int right = hs[2 * i + 1].AdjacentFace;
+                if (halfedges[2 * i].IsUnused) continue;
 
-                int clStart = hs[2 * i].StartVertex;
-                int clEnd = hs[2 * i + 1].StartVertex;
-                float x = (vs[clStart].X + vs[clEnd].X) / 2;
-                float y = (vs[clStart].Y + vs[clEnd].Y) / 2;
-                float z = (vs[clStart].Z + vs[clEnd].Z) / 2;
-                var g1 = gR[clStart];
-                var g2 = gR[clEnd];
-                var g = g1 > g2 ? g1 : g2;
-                int cle = hs.CollapseEdge(2 * i);
-                if(cle != -1)
+                int startVert = halfedges[2 * i].StartVertex;
+                int endVert   = halfedges[2 * i + 1].StartVertex;
+
+                if (isVertexFixed[startVert] && isVertexFixed[endVert]) continue;
+
+                double avgTargetLength = (perVertexTargetLength[startVert] + perVertexTargetLength[endVert]) / 2.0;
+
+                if (edgeLengths[2 * i] < (1 - remeshTolerance) * 0.25f * avgTargetLength)
                 {
-                  stop = false;
-                  vs.SetVertex(clStart, x, y, z);
-                  tL[clStart] = tl;
-                  gR[clStart] = g;
-                  tL.RemoveAt(clEnd);
-                  gR.RemoveAt(clEnd);
+                    int nextHe    = halfedges[2 * i].NextHalfedge;
+                    int prevHe    = halfedges[2 * i + 1].PrevHalfedge;
+                    int leftFace  = halfedges[2 * i].AdjacentFace;
+                    int rightFace = halfedges[2 * i + 1].AdjacentFace;
 
-                  //remove
-                  springs.RemoveAt(i);
-                  hinges.RemoveAt(i);
-                  PSys.DeleteParticle(clEnd);
-                  if(left != -1)
-                  {
-                    springs.RemoveAt(next / 2);
-                    hinges.RemoveAt(next / 2);
-                  }
-                  if(right != -1)
-                  {
-                    springs.RemoveAt(prev / 2);
-                    hinges.RemoveAt(prev / 2);
-                  }
-                  //loop change p & mark skip
-                  IEnumerable <int> nhs = hs.GetVertexCirculator(cle);
-                  foreach(var nh in nhs)
-                  {
-                    int edge = nh / 2;
-                    //hinge
-                    hinges[edge].PIndex[0] = hinges[edge].PIndex[0] == clEnd ? clStart : hinges[edge].PIndex[0];
-                    hinges[edge].PIndex[1] = hinges[edge].PIndex[1] == clEnd ? clStart : hinges[edge].PIndex[1];
-                    hinges[edge].PIndex[2] = hinges[edge].PIndex[2] == clEnd ? clStart : hinges[edge].PIndex[2];
-                    hinges[edge].PIndex[3] = hinges[edge].PIndex[3] == clEnd ? clStart : hinges[edge].PIndex[3];
-                    //spring
-                    springs[edge].PIndex[0] = springs[edge].PIndex[0] == clEnd ? clStart : springs[edge].PIndex[0];
-                    springs[edge].PIndex[1] = springs[edge].PIndex[1] == clEnd ? clStart : springs[edge].PIndex[1];
-                    //skip
-                    skip[hs[hs.GetPairHalfedge(nh)].StartVertex] = true;
-                  }
+                    int collapseStart = halfedges[2 * i].StartVertex;
+                    int collapseEnd   = halfedges[2 * i + 1].StartVertex;
+
+                    float midX = (vertices[collapseStart].X + vertices[collapseEnd].X) / 2f;
+                    float midY = (vertices[collapseStart].Y + vertices[collapseEnd].Y) / 2f;
+                    float midZ = (vertices[collapseStart].Z + vertices[collapseEnd].Z) / 2f;
+
+                    double growthStart = perVertexGrowthRate[collapseStart];
+                    double growthEnd   = perVertexGrowthRate[collapseEnd];
+                    double keepGrowth  = growthStart > growthEnd ? growthStart : growthEnd;
+
+                    int survivingHalfedge = halfedges.CollapseEdge(2 * i);
+                    if (survivingHalfedge == -1) continue; // collapse failed
+
+                    remeshComplete = false;
+
+                    vertices.SetVertex(collapseStart, midX, midY, midZ);
+                    perVertexTargetLength[collapseStart] = avgTargetLength;
+                    perVertexGrowthRate[collapseStart]   = keepGrowth;
+                    perVertexTargetLength.RemoveAt(collapseEnd);
+                    perVertexGrowthRate.RemoveAt(collapseEnd);
+
+                    // Remove goals for the collapsed edge and its faces' edges
+                    springGoals.RemoveAt(i);
+                    hingeGoals.RemoveAt(i);
+                    physicsSystem.DeleteParticle(collapseEnd);
+
+                    if (leftFace  != -1) { springGoals.RemoveAt(nextHe / 2); hingeGoals.RemoveAt(nextHe / 2); }
+                    if (rightFace != -1) { springGoals.RemoveAt(prevHe / 2); hingeGoals.RemoveAt(prevHe / 2); }
+
+                    // Remap vertex indices from removed vertex to surviving vertex
+                    IEnumerable<int> neighborHalfedges = halfedges.GetVertexCirculator(survivingHalfedge);
+                    foreach (var neighborHe in neighborHalfedges)
+                    {
+                        int edgeIndex = neighborHe / 2;
+
+                        for (int k = 0; k < 4; k++)
+                            if (hingeGoals[edgeIndex].PIndex[k] == collapseEnd)
+                                hingeGoals[edgeIndex].PIndex[k] = collapseStart;
+
+                        for (int k = 0; k < 2; k++)
+                            if (springGoals[edgeIndex].PIndex[k] == collapseEnd)
+                                springGoals[edgeIndex].PIndex[k] = collapseStart;
+
+                        // Flag the opposite vertex as fixed to avoid processing stale edges
+                        isVertexFixed[halfedges[halfedges.GetPairHalfedge(neighborHe)].StartVertex] = true;
+                    }
                 }
-              }
             }
-          }
-        }
-        P.Compact();
-        ec = hs.Count / 2;
-        for(int i = 0; i < ec;i++)
-        {
-          if(!hs[2 * i].IsUnused
-            && hs[2 * i].AdjacentFace != -1
-            && hs[2 * i + 1].AdjacentFace != -1
-            && hs[hs.GetPairHalfedge(hs[2 * i].NextHalfedge)].AdjacentFace != -1
-            && hs[hs.GetPairHalfedge(hs[2 * i].PrevHalfedge)].AdjacentFace != -1
-            && hs[hs.GetPairHalfedge(hs[2 * i + 1].NextHalfedge)].AdjacentFace != -1
-            && hs[hs.GetPairHalfedge(hs[2 * i + 1].PrevHalfedge)].AdjacentFace != -1
-            )
-          {
-            int v1 = hs[2 * i].StartVertex;
-            int v2 = hs[2 * i + 1].StartVertex;
-            int v3 = hs[hs[hs[2 * i].NextHalfedge].NextHalfedge].StartVertex;
-            int v4 = hs[hs[hs[2 * i + 1].NextHalfedge].NextHalfedge].StartVertex;
-            Point3d P1 = vs[v1].ToPoint3d();
-            Point3d P2 = vs[v2].ToPoint3d();
-            Point3d P3 = vs[v3].ToPoint3d();
-            Point3d P4 = vs[v4].ToPoint3d();
-            double A1 = Vector3d.VectorAngle(new Vector3d(P3 - P1), new Vector3d(P4 - P1))
-              + Vector3d.VectorAngle(new Vector3d(P4 - P2), new Vector3d(P3 - P2));
-            double A2 = Vector3d.VectorAngle(new Vector3d(P1 - P4), new Vector3d(P2 - P4))
-              + Vector3d.VectorAngle(new Vector3d(P2 - P3), new Vector3d(P1 - P3));
-            if (A2 > A1)
+
+            halfedgeMesh.Compact();
+
+            // Flip
+            int finalEdgeCount = halfedges.Count / 2;
+            for (int i = 0; i < finalEdgeCount; i++)
             {
-              stop = false;
-              P.Halfedges.FlipEdge(2 * i);
+                if (halfedges[2 * i].IsUnused) continue;
 
-              //modify springs
-              springs[i] = new Spring(v3, v4, P3.DistanceTo(P4), springstr);
-              //modify hinges
-              double a;
-              GetHinge(2 * i, P, out a);
-              hinges[i] = new Hinge(v3, v4, v2, v1, 0, hingestr);
+                // Edge must be interior and all surrounding edges must also be interior
+                bool isInteriorEdge =
+                    halfedges[2 * i].AdjacentFace     != -1 &&
+                    halfedges[2 * i + 1].AdjacentFace != -1 &&
+                    halfedges[halfedges.GetPairHalfedge(halfedges[2 * i].NextHalfedge)].AdjacentFace     != -1 &&
+                    halfedges[halfedges.GetPairHalfedge(halfedges[2 * i].PrevHalfedge)].AdjacentFace     != -1 &&
+                    halfedges[halfedges.GetPairHalfedge(halfedges[2 * i + 1].NextHalfedge)].AdjacentFace != -1 &&
+                    halfedges[halfedges.GetPairHalfedge(halfedges[2 * i + 1].PrevHalfedge)].AdjacentFace != -1;
+
+                if (!isInteriorEdge) continue;
+
+                int v1 = halfedges[2 * i].StartVertex;
+                int v2 = halfedges[2 * i + 1].StartVertex;
+                int v3 = halfedges[halfedges[halfedges[2 * i].NextHalfedge].NextHalfedge].StartVertex;
+                int v4 = halfedges[halfedges[halfedges[2 * i + 1].NextHalfedge].NextHalfedge].StartVertex;
+
+                Point3d P1 = vertices[v1].ToPoint3d();
+                Point3d P2 = vertices[v2].ToPoint3d();
+                Point3d P3 = vertices[v3].ToPoint3d();
+                Point3d P4 = vertices[v4].ToPoint3d();
+
+                // Sum of opposite angles for current diagonal
+                double currentDiagonalAngles =
+                    Vector3d.VectorAngle(new Vector3d(P3 - P1), new Vector3d(P4 - P1)) +
+                    Vector3d.VectorAngle(new Vector3d(P4 - P2), new Vector3d(P3 - P2));
+
+                // Sum of opposite angles for flipped diagonal
+                double flippedDiagonalAngles =
+                    Vector3d.VectorAngle(new Vector3d(P1 - P4), new Vector3d(P2 - P4)) +
+                    Vector3d.VectorAngle(new Vector3d(P2 - P3), new Vector3d(P1 - P3));
+
+                if (flippedDiagonalAngles > currentDiagonalAngles)
+                {
+                    remeshComplete = false;
+                    halfedgeMesh.Halfedges.FlipEdge(2 * i);
+
+                    springGoals[i] = new Spring(v3, v4, P3.DistanceTo(P4), springStrength);
+
+                    double unusedAngle;
+                    GetHingeVertices(2 * i, halfedgeMesh, out unusedAngle);
+                    hingeGoals[i] = new Hinge(v3, v4, v2, v1, 0, currentHingeStrength);
+                }
             }
-          }
+
+            // Continue until converged or tolerance has decayed to near zero
+            remeshComplete = remeshTolerance > 0.05 ? false : remeshComplete;
+            remeshTolerance *= clampedRemeshDecay;
+            remeshIterations++;
+
+        } while (!remeshComplete && remeshIterations < 101);
+
+        Print("{0}", remeshIterations - 1);
+        halfedgeMesh.Compact();
+
+
+        // Growth Step 
+
+        var allGoals = new List<IGoal>();
+
+        for (int i = 0; i < halfedgeMesh.Halfedges.Count / 2; i++)
+        {
+            Spring spring = springGoals[i] as Spring;
+            int    sv     = spring.PIndex[0];
+            int    ev     = spring.PIndex[1];
+
+            // Grow rest length by combined growth and environment rates
+            spring.RestLength += (perVertexGrowthRate[sv] + perVertexGrowthRate[ev])
+                               * (perVertexEnvValue[sv]   + perVertexEnvValue[ev]) / 4.0;
+            allGoals.Add(spring);
+
+            Hinge hinge = hingeGoals[i] as Hinge;
+            if (hinge.Strength != 0) allGoals.Add(hinge);
         }
-        stop = t > 0.05 ? false : stop;
-        t *= dr;
-        counter++;
-      }while(!(stop) && counter < 101);Print("{0}", counter - 1);
-      P.Compact();
 
-      //growth start
-      var goals = new List<IGoal>();
-      for(int i = 0;i < P.Halfedges.Count / 2;i++)
-      {
-        Spring s = springs[i] as Spring;
-        s.RestLength += (gR[s.PIndex[0]] + gR[s.PIndex[1]] ) * (eR[s.PIndex[0]] + eR[s.PIndex[1]] ) / 4; goals.Add((IGoal) s);
-        Hinge hge = hinges[i] as Hinge;
-        if(hge.Strength != 0){goals.Add((IGoal) hge);}
-      }
-      goals.AddRange(anchors);
-      goals.Add(new GrowthPush(dist1, dist2, P));
-      goals.Add(new MeshPush(P, colMesh, 0.5));
-      PSys.Step(goals, true, 0.1);
-      var particles = PSys.GetPositionArray();
-      for(int n = 0;n < particles.Count();n++)
-      {
-        Vector3d sp = particles[n] - P.Vertices[n].ToPoint3d();
-        eR[n] = Interpolate(particles[n]);
-        //when growthrate<0.0001, stop growth
-        if(!skip[n] && sp.Length < 0.0001 && gR[n] < 0.0001 || eR[n] < 0)
+        allGoals.AddRange(anchorGoals);
+        allGoals.Add(new GrowthPush(selfPushDist1, selfPushDist2, halfedgeMesh));
+        allGoals.Add(new MeshPush(halfedgeMesh, collideMesh, 0.5));
+
+        physicsSystem.Step(allGoals, true, 0.1);
+
+        Point3d[] updatedPositions = physicsSystem.GetPositionArray();
+
+        for (int n = 0; n < updatedPositions.Count(); n++)
         {
-          skip[n] = true;
-          gR[n] = 0;
-          IGoal anch = new AnchorXYZ(particles[n], true, true, true, 100);
-          anch.PIndex = new int[1]{n};
-          anchors.Add(anch);
-        }
-        P.Vertices.SetVertex(n, particles[n]);
-      }
-    }
-    A = P;
-    B = gR;
-    C = _counter++;
-    E = eR;
-    F = skip;
+            Vector3d displacement = updatedPositions[n] - halfedgeMesh.Vertices[n].ToPoint3d();
+            perVertexEnvValue[n]  = Interpolate(updatedPositions[n]);
 
+            // Freeze vertex if growth has effectively stopped or it left the growth field
+            bool growthStopped  = !isVertexFixed[n] && displacement.Length < 0.0001 && perVertexGrowthRate[n] < 0.0001;
+            bool outsideGrowthField = perVertexEnvValue[n] < 0;
 
-  }
-
-  // <Custom additional code> 
-
-
-
-  List<double> tL;//target length
-  List<double> gR;//growth rate
-  List<double> eR = new List<double>();
-  List<bool> skip;
-  PlanktonMesh P;
-  Mesh colMesh;
-  int _counter = 0;
-
-  //edata
-  double[][] edata;
-  int xNum,yNum;
-  UVInterval uvDom;
-  //interpolaton
-  public double Interpolate(Point3d pt)
-  {
-    var x = xNum * (pt.X - uvDom.U0) / uvDom.U.Length;
-    int xx = x > 0 ? (x < xNum - 2 ? (int) x : xNum - 2) : 0;
-
-    var y = yNum * (pt.Y - uvDom.V0) / uvDom.V.Length;
-    int yy = y > 0 ? (y < yNum - 2 ? (int) y : yNum - 2) : 0;
-
-
-    var y1 =
-      edata[xx][yy] * (1 - x + xx)
-      +
-      edata[xx + 1][yy] * (x - xx);
-
-    var y2 =
-      edata[xx][yy + 1] * (1 - x + xx)
-      +
-      edata[xx + 1][yy + 1] * (x - xx);
-
-    return
-      y1 * (1 - y + yy)
-      +
-      y2 * (y - yy);
-  }
-
-  //physics
-  KangarooSolver.PhysicalSystem PSys;
-  List<IGoal> springs;
-  List<IGoal> hinges;
-  List<IGoal> anchors;
-
-  public int[] GetHinge(int h, PlanktonMesh p, out double a)
-  {
-    int[] output = new int[4];
-
-    output[0] = p.Halfedges[h].StartVertex;
-    Point3d P0 = p.Vertices[p.Halfedges[h].StartVertex].ToPoint3d();
-
-    int ph = p.Halfedges.GetPairHalfedge(h);
-    output[1] = p.Halfedges[ph].StartVertex;
-    Point3d P1 = p.Vertices[p.Halfedges[ph].StartVertex].ToPoint3d();
-
-    int php = p.Halfedges[ph].PrevHalfedge;
-    output[2] = p.Halfedges[php].StartVertex;
-    Point3d P2 = p.Vertices[p.Halfedges[php].StartVertex].ToPoint3d();
-
-    int hp = p.Halfedges[h].PrevHalfedge;
-    output[3] = p.Halfedges[hp].StartVertex;
-    Point3d P3 = p.Vertices[p.Halfedges[hp].StartVertex].ToPoint3d();
-
-    Vector3d V01 = P1 - P0;
-    Vector3d V02 = P2 - P0;
-    Vector3d V03 = P3 - P0;
-
-    Vector3d Cross0 = Vector3d.CrossProduct(V02, V01);
-    Vector3d Cross1 = Vector3d.CrossProduct(V01, V03);
-
-    double temp = Vector3d.VectorAngle(Cross0, Cross1, new Plane(P0, V01));
-    if (temp > Math.PI) { temp -= 2 * Math.PI; }
-    a = temp;
-    return output;
-  }
-
-
-
-
-  //this class of instance refresh in every iteration.
-  public class GrowthPush:GoalObject
-  {
-    public double Strength = 1;
-    public double SqrPushDist1;
-    public double SqrPushDist2;
-    public double PushDist1;
-    public double PushDist2;
-    PlanktonMesh Pm;
-
-
-    private bool CheckNeighbor(int v1, int v2)
-    {
-      IEnumerable <int> nhs = Pm.Halfedges.GetVertexCirculator(Pm.Vertices[v1].OutgoingHalfedge);
-      foreach( var nh in nhs)
-      {
-        if (Pm.Halfedges[Pm.Halfedges[nh].NextHalfedge].StartVertex == v2)
-        {return true;}
-      }
-      return false;
-    }
-
-
-    //GrowthPush
-    public GrowthPush(double dist1, double dist2, PlanktonMesh pm)
-    {
-      //base
-      PIndex = Enumerable.Range(0, pm.Vertices.Count).ToArray();
-      int num = PIndex.Length;
-      Move = new Vector3d[num];
-      Weighting = new double[num];
-      for (int i = 0; i < num; i++)
-      {
-        Weighting[i] = Strength;
-      }
-      //this
-      SqrPushDist1 = dist1 * dist1;
-      SqrPushDist2 = dist2 * dist2;
-      PushDist1 = dist1;
-      PushDist2 = dist2;
-      Pm = pm;
-    }
-
-    public override void Calculate(List < KangarooSolver.Particle > p)
-    {
-      int num = PIndex.Length;
-      double[] Zcoord = new double[num];
-
-      for (int i = 0; i < num; i++)
-      {
-        Zcoord[i] = p[PIndex[i]].Position.Z;
-        Move[i] = Vector3d.Zero;
-      }
-      Array.Sort(Zcoord, PIndex);
-
-
-      Parallel.For(0, PIndex.Length - 1, i =>
-        {
-        for (int j = 1; (i + j) < PIndex.Length; j++)
-        {
-          int k = i + j;
-          int ind1 = PIndex[k];
-          int ind2 = PIndex[i];
-          bool isPair = CheckNeighbor(ind1, ind2);
-          Vector3d Sp = p[ind1].Position - p[ind2].Position;
-          if(isPair)
-          {
-            if (Sp.Z < PushDist1)
+            if (growthStopped || outsideGrowthField)
             {
-              for(var sl = Sp.SquareLength;sl < SqrPushDist1;)
-              {
-                var l = Math.Sqrt(sl);
-                double factor = 1 - PushDist1 / l;
-                Vector3d dmove = 0.1 * Sp * factor;
-                Move[i] += dmove;
-                Move[k] -= dmove;
-                break;
-              }
+                isVertexFixed[n]         = true;
+                perVertexGrowthRate[n]   = 0;
+                IGoal anchor             = new AnchorXYZ(updatedPositions[n], true, true, true, 100);
+                anchor.PIndex            = new int[1] { n };
+                anchorGoals.Add(anchor);
             }
-            else { break; }
-          }
-          else
-          {
-            if (Sp.Z < PushDist2)
+
+            halfedgeMesh.Vertices.SetVertex(n, updatedPositions[n]);
+        }
+    }
+
+    // Outputs 
+    A = halfedgeMesh;
+    B = perVertexGrowthRate;
+    C = _iterationCount++;
+    E = perVertexEnvValue;
+    F = isVertexFixed;
+}
+
+
+// Persistent State Fields
+
+List<double> perVertexTargetLength;
+List<double> perVertexGrowthRate;
+List<double> perVertexEnvValue = new List<double>();
+List<bool>   isVertexFixed;
+PlanktonMesh halfedgeMesh;
+Mesh         collideMesh;
+int          _iterationCount = 0;
+
+// Environment data grid
+double[][] envData;
+int        xCount, yCount;
+UVInterval uvDomain;
+
+// Physics
+KangarooSolver.PhysicalSystem physicsSystem;
+List<IGoal> springGoals;
+List<IGoal> hingeGoals;
+List<IGoal> anchorGoals;
+
+
+// Bilinear Interpolation of Environment Data 
+public double Interpolate(Point3d point)
+{
+    double xNorm = xCount * (point.X - uvDomain.U0) / uvDomain.U.Length;
+    int    xIdx  = xNorm > 0 ? (xNorm < xCount - 2 ? (int) xNorm : xCount - 2) : 0;
+
+    double yNorm = yCount * (point.Y - uvDomain.V0) / uvDomain.V.Length;
+    int    yIdx  = yNorm > 0 ? (yNorm < yCount - 2 ? (int) yNorm : yCount - 2) : 0;
+
+    double xFrac = xNorm - xIdx; // fractional part in X
+    double yFrac = yNorm - yIdx; // fractional part in Y
+
+    double bottomRow = envData[xIdx][yIdx]     * (1 - xFrac) + envData[xIdx + 1][yIdx]     * xFrac;
+    double topRow    = envData[xIdx][yIdx + 1] * (1 - xFrac) + envData[xIdx + 1][yIdx + 1] * xFrac;
+
+    return bottomRow * (1 - yFrac) + topRow * yFrac;
+}
+
+
+// Hinge Vertex Lookup
+public int[] GetHingeVertices(int halfedgeIndex, PlanktonMesh mesh, out double restAngle)
+{
+    int[] verts = new int[4];
+
+    // v0: start of the halfedge
+    verts[0] = mesh.Halfedges[halfedgeIndex].StartVertex;
+    Point3d P0 = mesh.Vertices[verts[0]].ToPoint3d();
+
+    // v1: start of the pair (other end of edge)
+    int pairHe = mesh.Halfedges.GetPairHalfedge(halfedgeIndex);
+    verts[1] = mesh.Halfedges[pairHe].StartVertex;
+    Point3d P1 = mesh.Vertices[verts[1]].ToPoint3d();
+
+    // v2: tip of the triangle on the pair side
+    int pairPrevHe = mesh.Halfedges[pairHe].PrevHalfedge;
+    verts[2] = mesh.Halfedges[pairPrevHe].StartVertex;
+    Point3d P2 = mesh.Vertices[verts[2]].ToPoint3d();
+
+    // v3: tip of the triangle on the primary side
+    int primaryPrevHe = mesh.Halfedges[halfedgeIndex].PrevHalfedge;
+    verts[3] = mesh.Halfedges[primaryPrevHe].StartVertex;
+    Point3d P3 = mesh.Vertices[verts[3]].ToPoint3d();
+
+    // Dihedral angle between the two adjacent triangles
+    Vector3d edgeVec    = P1 - P0;
+    Vector3d toV2       = P2 - P0;
+    Vector3d toV3       = P3 - P0;
+    Vector3d normalLeft  = Vector3d.CrossProduct(toV2, edgeVec);
+    Vector3d normalRight = Vector3d.CrossProduct(edgeVec, toV3);
+
+    double angle = Vector3d.VectorAngle(normalLeft, normalRight, new Plane(P0, edgeVec));
+    if (angle > Math.PI) angle -= 2 * Math.PI;
+    restAngle = angle;
+
+    return verts;
+}
+
+
+// GrowthPush Goal
+// Pushes vertices apart when they come within a threshold distance of each other.
+// Uses a tighter distance for mesh-adjacent pairs and a looser one for non-adjacent pairs.
+
+public class GrowthPush : GoalObject
+{
+    public double Strength = 1.0;
+    public double sqrPushDistAdjacent;
+    public double sqrPushDistNonAdjacent;
+    public double pushDistAdjacent;
+    public double pushDistNonAdjacent;
+    PlanktonMesh sourceMesh;
+
+    private bool AreVerticesAdjacent(int vertA, int vertB)
+    {
+        IEnumerable<int> neighborHalfedges = sourceMesh.Halfedges.GetVertexCirculator(
+            sourceMesh.Vertices[vertA].OutgoingHalfedge);
+
+        foreach (var he in neighborHalfedges)
+        {
+            if (sourceMesh.Halfedges[sourceMesh.Halfedges[he].NextHalfedge].StartVertex == vertB)
+                return true;
+        }
+        return false;
+    }
+
+    public GrowthPush(double distAdjacent, double distNonAdjacent, PlanktonMesh mesh)
+    {
+        PIndex   = Enumerable.Range(0, mesh.Vertices.Count).ToArray();
+        int num  = PIndex.Length;
+        Move     = new Vector3d[num];
+        Weighting = new double[num];
+
+        for (int i = 0; i < num; i++)
+            Weighting[i] = Strength;
+
+        sqrPushDistAdjacent    = distAdjacent * distAdjacent;
+        sqrPushDistNonAdjacent = distNonAdjacent * distNonAdjacent;
+        pushDistAdjacent       = distAdjacent;
+        pushDistNonAdjacent    = distNonAdjacent;
+        sourceMesh             = mesh;
+    }
+
+    public override void Calculate(List<KangarooSolver.Particle> particles)
+    {
+        int num = PIndex.Length;
+
+        // Sort vertices by Z so we can early-exit inner loop when Z gap exceeds push distance
+        double[] zCoords = new double[num];
+        for (int i = 0; i < num; i++)
+            zCoords[i] = particles[PIndex[i]].Position.Z;
+
+        Array.Sort(zCoords, PIndex);
+
+        Parallel.For(0, PIndex.Length - 1, i =>
+        {
+            for (int j = 1; (i + j) < PIndex.Length; j++)
             {
-              for(var sl = Sp.SquareLength;sl < SqrPushDist2;)
-              {
-                var l = Math.Sqrt(sl);
-                double factor = 1 - PushDist2 / l;
-                Vector3d dmove = 0.1 * Sp * factor;
-                Move[i] += dmove;
-                Move[k] -= dmove;
-                break;
-              }
+                int k     = i + j;
+                int idxHi = PIndex[k];
+                int idxLo = PIndex[i];
+
+                bool adjacent   = AreVerticesAdjacent(idxHi, idxLo);
+                double pushDist = adjacent ? pushDistAdjacent : pushDistNonAdjacent;
+                double sqrDist  = adjacent ? sqrPushDistAdjacent : sqrPushDistNonAdjacent;
+
+                Vector3d separation = particles[idxHi].Position - particles[idxLo].Position;
+
+                if (separation.Z >= pushDist) break; // further vertices in sorted order are too far
+
+                double sqrLen = separation.SquareLength;
+                if (sqrLen < sqrDist)
+                {
+                    double len    = Math.Sqrt(sqrLen);
+                    double factor = 1.0 - pushDist / len;
+                    Vector3d push = 0.1 * separation * factor;
+                    Move[i] += push;
+                    Move[k] -= push;
+                }
             }
-            else { break; }
-          }
-        }
-        });
-
-    }
-  }
-  //MeshPush
-  public class MeshPush : GoalObject
-  {
-
-    public double Strength = 1;
-    PlanktonMesh Pm;
-    Mesh M;
-    double Dist;
-    double SquareDist;
-
-    public MeshPush(PlanktonMesh pm, Mesh m, double dist)
-    {
-      //base
-      PIndex = Enumerable.Range(0, pm.Vertices.Count).ToArray();
-      int num = PIndex.Length;
-      Move = new Vector3d[num];
-      Weighting = new double[num];
-      for (int i = 0; i < num; i++)
-      {
-        Weighting[i] = Strength;
-      }
-      //this
-      Pm = pm;M = m;SquareDist = dist * dist;Dist = dist;
-    }
-
-    public override void Calculate(List < KangarooSolver.Particle > p)
-    {
-      Parallel.For(0, PIndex.Length, i =>
-        {
-        Point3d ThisPt = p[PIndex[i]].Position;
-        var MP = M.ClosestMeshPoint(ThisPt, 1000);
-        var Push = MP.Point - ThisPt;
-        var sl = Push.SquareLength;
-        if(sl < SquareDist)
-        {
-          var l = Math.Sqrt(sl);
-          double factor = 1 - Dist / l;
-          Vector3d dmove = 0.5 * Push * factor;
-          Move[i] = dmove;
-        }
         });
     }
-  }
+}
 
+
+// ── MeshPush Goal ─────────────────────────────────────────────────────────────
+// Pushes vertices away from a collision mesh surface when within a threshold distance.
+
+public class MeshPush : GoalObject
+{
+    public double Strength = 1.0;
+    PlanktonMesh sourceMesh;
+    Mesh         targetMesh;
+    double       pushDist;
+    double       sqrPushDist;
+
+    public MeshPush(PlanktonMesh meshParticles, Mesh collisionTarget, double dist)
+    {
+        PIndex    = Enumerable.Range(0, meshParticles.Vertices.Count).ToArray();
+        int num   = PIndex.Length;
+        Move      = new Vector3d[num];
+        Weighting = new double[num];
+
+        for (int i = 0; i < num; i++)
+            Weighting[i] = Strength;
+
+        sourceMesh  = meshParticles;
+        targetMesh  = collisionTarget;
+        sqrPushDist = dist * dist;
+        pushDist    = dist;
+    }
+
+    public override void Calculate(List<KangarooSolver.Particle> particles)
+    {
+        Parallel.For(0, PIndex.Length, i =>
+        {
+            Point3d vertexPos      = particles[PIndex[i]].Position;
+            var     closestPoint   = targetMesh.ClosestMeshPoint(vertexPos, 1000);
+            Vector3d toSurface     = closestPoint.Point - vertexPos;
+            double   sqrLen        = toSurface.SquareLength;
+
+            if (sqrLen < sqrPushDist)
+            {
+                double   len    = Math.Sqrt(sqrLen);
+                double   factor = 1.0 - pushDist / len;
+                Move[i] = 0.5 * toSurface * factor;
+            }
+        });
+    }
   // </Custom additional code> 
 }

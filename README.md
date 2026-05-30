@@ -1,7 +1,7 @@
 ![UUV Mapping](./MeshGrowth.gif) 
 # Mesh Growth
 
-This project is inspired by Nervous System’s Floraform framework, where form is generated through differential growth, local interaction rules, and adaptive remeshing.
+This project is inspired by Nervous System’s Floraform project, where form is generated through differential growth, local interaction rules, and adaptive remeshing.
 
 In a similar spirit, this project treats geometry as a dynamic system that evolves through:
 - local growth rates

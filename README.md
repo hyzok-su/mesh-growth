@@ -1,5 +1,6 @@
-![UUV Mapping](./MeshGrowth.gif) 
 # Mesh Growth
+
+![UUV Mapping](./MeshGrowth.gif) 
 
 ## Overview
 

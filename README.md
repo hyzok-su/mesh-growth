@@ -1,6 +1,6 @@
 # Mesh Growth
 
-![UUV Mapping](./MeshGrowth.gif) 
+<img src="./MeshGrowth.gif" width="80%"/>
 
 ## Overview
 
